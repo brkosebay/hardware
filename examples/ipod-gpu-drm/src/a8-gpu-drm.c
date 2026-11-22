@@ -1087,6 +1087,18 @@ static int kms(u32 want_w, u32 want_h, const char *want_link, const char *skip)
 
 	/* Modeset: buffer A with the bars */
 	r = dumb_fb(&a, w, h);
+	if (r == -12 && skip && streq(skip, "bypass")) {
+		/*
+		 * In bypass a buffer must be physically contiguous, from the
+		 * 16 MiB CMA area that the console's frame already uses: on
+		 * the iPad mini 4 and iPhone 6 Plus a second frame does not fit.
+		 */
+		result("modeset", "SKIPPED (display DART in bypass: no contiguous memory for a second frame)\n");
+		result("flip", "SKIPPED (no buffer to flip)\n");
+		result("import", "SKIPPED (the display DART is in bypass)\n");
+		flush();
+		return fails ? 1 : 0;
+	}
 	if (r) {
 		result("modeset", "FAIL dumb buffer: ");
 		puti(r);

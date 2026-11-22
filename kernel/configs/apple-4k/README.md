@@ -12,6 +12,11 @@ function as modules. RAM and recovery images can bind their configfs gadget at
 startup; users of the legacy composite gadget can load it when needed. FUSE
 remains a module.
 
+The display pipe driver (`DRM_APPLE_ADBE`) is a module here, unlike in
+`apple-16k`: the A8 GPU tester kit (`examples/ipod-gpu-drm`) boots on simpledrm
+and loads it only in its display test step, under a hardware watchdog, on
+boards where it has not run before.
+
 The USB host class drivers (storage, UAS, exFAT, USB Ethernet, USB audio)
 are the same as in `apple-16k`. The A9/A10 Lightning role switch and the
 charger's accessory policy (`USB_ROLES_APPLE_S8000`,

@@ -21,8 +21,10 @@ so a frozen SoC resets by itself.
 ## Requirements
 
 - A Mac or a Linux PC, a USB cable, and the device. Any iOS version.
-- `python3` 3.11 or newer, and [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- What orchard needs to boot a device in DFU mode. `orchard/bin/orchard doctor` lists anything missing.
+- [uv](https://docs.astral.sh/uv/getting-started/installation/). It provides the Python that orchard runs on.
+- What orchard needs to boot a device in DFU mode: libusb, palera1n (orchard downloads it), and on Linux USB
+  permissions. `orchard/bin/orchard setup-host` installs what is missing and does not touch a device. Building
+  tools such as podman are not needed.
 - Internet access. `setup.sh` fetches the GPU firmware (about 15 MB) from Apple's public iPod touch 6
   iOS 12.4 IPSW. The kit does not include any Apple files.
 

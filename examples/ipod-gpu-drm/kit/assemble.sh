@@ -26,10 +26,10 @@ for f in kernel/kernel.release kernel/Image.gz kernel/dtbs/t7000-$board.dtb m1n1
   [[ -e $prebuilt/$f ]] || die "$prebuilt has no $f"
 done
 command -v uv >/dev/null || die 'install uv first: https://docs.astral.sh/uv/getting-started/installation/'
-python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null || die 'needs python3 3.11 or newer'
 
+# Python is the checkout's own (bin/orchard python: uv provides one, so the host's python3 does not matter)
 mkdir -p "$here/rootfs/usr/bin" "$here/rootfs/lib/firmware/apple" "$here/rootfs/opt"
-python3 -I "$here/tools/extract-fw.py" "$here/rootfs/lib/firmware/apple"
+"$orchard/bin/orchard" python -I "$here/tools/extract-fw.py" "$here/rootfs/lib/firmware/apple"
 cp "$prebuilt/a8-gpu-drm" "$here/rootfs/usr/bin/a8-gpu-drm"
 chmod 755 "$here/rootfs/usr/bin/a8-gpu-drm"
 rm -rf "$here/rootfs/opt/a8vk" "$here/rootfs/usr/share/a8-gpu-drm"
@@ -37,7 +37,7 @@ cp -R "$prebuilt/a8vk" "$here/rootfs/opt/a8vk"
 
 ORCHARD_PUBLISHED=off "$orchard/bin/orchard" build "$here" --device "$board" --kernel-dir "$prebuilt/kernel" \
   --loader "$prebuilt/m1n1.bin" --pongo "$prebuilt/pongo.bin" --cache "$prebuilt/cache"
-"$here/tools/verify-payload.sh"
+PYTHON="$orchard/.venv/bin/python" "$here/tools/verify-payload.sh"
 cat <<EOF
 
 kit: the payload is ready: $here/out/apple-4k

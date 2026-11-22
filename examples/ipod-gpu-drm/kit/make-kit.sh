@@ -8,6 +8,7 @@
 #   KIT_M1N1        orchard's m1n1.bin;  KIT_PONGO: orchard's released pongo.bin
 #   KIT_A8VK        the Vulkan bundle (vk/make-bundle.sh);  KIT_A8_GPU_DRM: src/a8-gpu-drm.c built (build.sh)
 #   KIT_SOURCES     a text file naming the source commits of the prebuilt pieces (goes into SOURCES.txt)
+#   KIT_BRANCH      optional: where that commit is published, e.g. "branch a8-gpu-tester-kit of github.com/OWNER/hardware"
 # Nothing from Apple goes in: the GPU firmware is fetched by setup.sh on the tester's machine, and this
 # script refuses a kit that contains the firmware files.
 set -euo pipefail
@@ -51,7 +52,8 @@ EOF
 {
   echo "$KIT_NAME"
   echo
-  echo "orchard/: OrchardLinux/orchard as of $(git -C "$orchard" rev-parse HEAD) (git archive)"
+  echo "orchard/: the orchard checkout this kit was packed from, commit $(git -C "$orchard" rev-parse HEAD)"
+  echo "  (git archive; ${KIT_BRANCH:-its branch})"
   echo
   cat "$KIT_SOURCES"
 } > "$kit/SOURCES.txt"

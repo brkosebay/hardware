@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # kit/make-kit.sh OUT: pack the A8 GPU tester kit (kit/README.md) as OUT/$KIT_NAME.tar.gz, from pieces built
 # beforehand. The checkout must be committed: the kit carries `git archive HEAD` of it as orchard/.
-#   KIT_NAME        e.g. a8-gpu-tester-kit-2
+#   KIT_NAME        e.g. a8-gpu-tester-kit-4
 #   KIT_KERNEL      the apple-4k kernel bundle `orchard build examples/minimal-boot --device n102` staged
 #                   (the directory of Image.gz, dtbs/, lib/, kernel.release; out/apple-4k/build.json names it)
 #   KIT_TOOLS       orchard's static tools directory for this checkout (the recovery-tools cache entry)

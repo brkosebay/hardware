@@ -6,9 +6,9 @@
 #   triangle  Mesa's tri-twiddled recording (TA + 3D); the 64x64 target checked pixel by pixel
 #   vk        Mesa live on the real driver: /opt/a8vk/a8-vk-smoke all (Vulkan probe, compute,
 #             triangle); PASS = its three RESULT lines PASS
-#   display   modprobe apple_adbe_drm: the display pipe driver takes the panel over from simpledrm
-#             (bind, the display DART's self-check and its CRCs), then a8-gpu-drm kms: the panel's
-#             mode and link (eDP on the iPad mini 4, MIPI DSI on the phones and the iPod), a
+#   display   modprobe apple_adbe_drm, unless it is loaded or built in: the display pipe driver
+#             takes the panel over from simpledrm (bind, the display DART's self-check and its
+#             CRCs), then a8-gpu-drm kms: the panel's mode and link (eDP on the iPad mini 4, MIPI DSI on the phones and the iPod), a
 #             modeset with colour bars, 30 timed page flips and, with powervr loaded and the DART
 #             translating, a powervr buffer scanned out through the display DART. One RESULT line
 #             per check, then "RESULT display PASS|FAIL". Needs no GPU step before it.
@@ -84,7 +84,12 @@ if [ "$step" = display ]; then
     *) refuse "not an A8 board this step knows: $(tr '\0' ' ' < /proc/device-tree/compatible)" ;;
     esac
     km=/lib/modules/$(uname -r)/kernel/drivers/gpu/drm/adbe/apple_adbe_drm.ko
-    [ -f "$km" ] || grep -q '^apple_adbe_drm ' /proc/modules || refuse "no $km in this initramfs"
+    # built into the kernel: no /proc/modules line, but its module or platform driver in /sys
+    adbe_builtin() {
+        ! grep -q '^apple_adbe_drm ' /proc/modules &&
+            { [ -d /sys/module/apple_adbe_drm ] || [ -d /sys/bus/platform/drivers/apple-adbe ]; }
+    }
+    [ -f "$km" ] || grep -q '^apple_adbe_drm ' /proc/modules || adbe_builtin || refuse "no $km in this initramfs"
     [ -x /usr/bin/a8-gpu-drm ] || refuse "no /usr/bin/a8-gpu-drm"
     bootfb=
     for f in /proc/device-tree/chosen/framebuffer*; do
@@ -147,6 +152,10 @@ display)
     strip() { sed -n '1s/^\[[^]]*\] //p'; }
     if grep -q '^apple_adbe_drm ' /proc/modules; then
         echo "apple_adbe_drm already loaded"
+        klog() { dmesg; }
+    elif adbe_builtin; then
+        # it bound at boot, before this step's marker
+        echo "apple_adbe_drm is built into the kernel"
         klog() { dmesg; }
     else
         echo "modprobe apple_adbe_drm"

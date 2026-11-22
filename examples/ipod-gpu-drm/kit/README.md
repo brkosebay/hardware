@@ -4,9 +4,12 @@ Test the Apple A8 GPU (PowerVR GX6450) with the Linux `powervr` driver and Mesa'
 display pipe with the `adbe` KMS driver, on your device, without building a kernel or Mesa. The kit is the
 `examples/ipod-gpu-drm` payload of OrchardLinux/orchard with its kernel, loader and Vulkan bundle prebuilt.
 
+The kit runs only Vulkan. Its Mesa build has no OpenGL, GLES or EGL (no Zink), so no step runs GL and there is
+no GL renderer to check.
+
 | Board | Device | Panel link | GPU | Display (`adbe`) |
 |---|---|---|---|---|
-| `n102` | iPod touch (6th generation) | MIPI DSI | tested | tested (desktop); this kit's display step not yet |
+| `n102` | iPod touch (6th generation) | MIPI DSI | tested | tested: the KMS test program passed with the driver built in; loading it as a module not yet |
 | `j96` | iPad mini 4 (Wi-Fi) | eDP | untested: please test | untested: please test |
 | `j97` | iPad mini 4 (Wi-Fi + Cellular) | eDP | untested: please test | untested: please test |
 | `n61` | iPhone 6 | MIPI DSI | untested: please test | untested: please test |
@@ -37,8 +40,8 @@ driver is loaded only by the display step.
    records its paths:
 
    ```sh
-   tar xzf a8-gpu-tester-kit-3.tar.gz
-   cd a8-gpu-tester-kit-3
+   tar xzf a8-gpu-tester-kit-4.tar.gz
+   cd a8-gpu-tester-kit-4
    ./setup.sh BOARD
    ```
 

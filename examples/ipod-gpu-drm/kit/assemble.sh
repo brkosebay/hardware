@@ -7,6 +7,7 @@
 #   cache/           an orchard cache with the static tools (BusyBox, Dropbear, ...) for this checkout's
 #                    recipes, so nothing is built or fetched from the nightly (--cache, ORCHARD_PUBLISHED=off)
 #   a8-gpu-drm       src/a8-gpu-drm.c, built                 -> rootfs/usr/bin/a8-gpu-drm
+#                    (the replays, and the display step's KMS checks)
 #   a8vk/            the Vulkan bundle (vk/make-bundle.sh)   -> rootfs/opt/a8vk
 # The GPU firmware is not in the kit: tools/extract-fw.py fetches it from Apple's public IPSW, as build.sh does.
 # Then: bin/orchard run examples/ipod-gpu-drm --device BOARD --no-build
@@ -25,6 +26,10 @@ for f in kernel/kernel.release kernel/Image.gz kernel/dtbs/t7000-$board.dtb m1n1
          a8vk/a8-vk-smoke a8vk/lib/libvulkan_powervr_mesa.so; do
   [[ -e $prebuilt/$f ]] || die "$prebuilt has no $f"
 done
+# the display step loads the display pipe's driver; it must be a module, not built in
+release=$(cat "$prebuilt/kernel/kernel.release")
+[[ -e $prebuilt/kernel/lib/modules/$release/kernel/drivers/gpu/drm/adbe/apple_adbe_drm.ko ]] ||
+  die "$prebuilt/kernel has no apple_adbe_drm.ko module for the display step"
 command -v uv >/dev/null || die 'install uv first: https://docs.astral.sh/uv/getting-started/installation/'
 
 # Python is the checkout's own (bin/orchard python: uv provides one, so the host's python3 does not matter)

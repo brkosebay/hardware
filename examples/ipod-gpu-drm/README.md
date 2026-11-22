@@ -9,6 +9,15 @@ OrchardLinux/mesa.
 It builds for every A8 board: the iPod touch 6 (`n102`, where the GPU has been tested), the iPad mini 4
 (`j96`, `j97`) and the iPhone 6 and 6 Plus (`n61`, `n56`). The A8X (iPad Air 2) has a different GPU.
 
+## Prebuilt: the tester kit
+
+To test without building a kernel or Mesa, use the A8 GPU tester kit: this example with its kernel, loader,
+static tools, DRM test program and Vulkan bundle prebuilt, in one archive. Its `setup.sh BOARD` fetches the GPU
+firmware the way `build.sh` does and assembles the payload with `kit/assemble.sh`. That script stages the
+prebuilt files and runs `orchard build` with `--kernel-dir`, `--loader`, `--pongo` and `--cache`, so nothing is
+compiled. Then `run.sh BOARD` boots the payload. The kit's steps are in [`kit/README.md`](kit/README.md), and
+[`kit/make-kit.sh`](kit/make-kit.sh) packs it. The kit carries no Apple files.
+
 ## Build
 
 Use the `orchard` launcher of this checkout (`bin/orchard`): the nightly `orchard` on PATH does not carry
@@ -77,3 +86,4 @@ streamed over the serial console show how far it got.
 | `tools/extract-fw.py` | the GPU firmware and border table from an Apple kernelcache |
 | `tools/gen-replay.py` | packs a Mesa recording into a replay file |
 | `vk/` | the Vulkan smoke test, the Vulkan ladder and `make-bundle.sh` |
+| `kit/` | the prebuilt tester kit: `assemble.sh`, its `setup.sh` and `run.sh`, `make-kit.sh` and its README |

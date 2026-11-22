@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # kit/make-kit.sh OUT: pack the A8 GPU tester kit (kit/README.md) as OUT/$KIT_NAME.tar.gz, from pieces built
 # beforehand. The checkout must be committed: the kit carries `git archive HEAD` of it as orchard/.
-#   KIT_NAME        e.g. a8-gpu-tester-kit-1
+#   KIT_NAME        e.g. a8-gpu-tester-kit-2
 #   KIT_KERNEL      the apple-4k kernel bundle `orchard build examples/minimal-boot --device n102` staged
 #                   (the directory of Image.gz, dtbs/, lib/, kernel.release; out/apple-4k/build.json names it)
 #   KIT_TOOLS       orchard's static tools directory for this checkout (the recovery-tools cache entry)
@@ -32,8 +32,9 @@ cp "$KIT_A8_GPU_DRM" "$kit/prebuilt/a8-gpu-drm"
 cp -R "$KIT_A8VK" "$kit/prebuilt/a8vk"
 
 # the static tools as an orchard cache entry under the key the kit's checkout computes, so that
-# `orchard build --cache prebuilt/cache` reuses them instead of building them
-key=$(cd "$kit/orchard" && "$orchard/bin/orchard" python -I -c \
+# `orchard build --cache prebuilt/cache` reuses them instead of building them. -B: no __pycache__ in the
+# kit, because .pyc files record the packer's absolute paths
+key=$(cd "$kit/orchard" && "$orchard/bin/orchard" python -I -B -c \
   'import sys; sys.path.insert(0, "src"); from pathlib import Path; from orchard.build import recipe_key, TOOL_INPUTS; print(recipe_key(Path("."), TOOL_INPUTS))')
 entry=$kit/prebuilt/cache/components-v2/recovery-tools/$key
 mkdir -p "$entry"
@@ -62,6 +63,17 @@ if find "$kit" -name 'gfx-t7000*' | grep -q . || [[ -d $kit/orchard/examples/ipo
   echo "make-kit: the kit contains GPU firmware; it must not" >&2
   exit 1
 fi
+if find "$kit" -name __pycache__ -o -name '*.pyc' | grep -q .; then
+  echo "make-kit: the kit contains Python bytecode, which records local paths; it must not" >&2
+  exit 1
+fi
 (cd "$kit" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 > SHA256SUMS)
-COPYFILE_DISABLE=1 tar -C "$out" -czf "$kit.tar.gz" "$KIT_NAME"
+# root-owned entries without extended attributes: the archive does not carry the packer's user and group
+# names, nor macOS metadata such as com.apple.provenance
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  flags=(--owner=0 --group=0 --numeric-owner --no-xattrs)
+else
+  flags=(--uid 0 --gid 0 --uname root --gname root --no-xattrs --no-mac-metadata --no-acls --no-fflags)
+fi
+COPYFILE_DISABLE=1 tar "${flags[@]}" -C "$out" -czf "$kit.tar.gz" "$KIT_NAME"
 shasum -a 256 "$kit.tar.gz"

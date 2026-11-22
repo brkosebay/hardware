@@ -36,8 +36,8 @@ so a frozen SoC resets by itself.
    records its paths:
 
    ```sh
-   tar xzf a8-gpu-tester-kit-1.tar.gz
-   cd a8-gpu-tester-kit-1
+   tar xzf a8-gpu-tester-kit-2.tar.gz
+   cd a8-gpu-tester-kit-2
    ./setup.sh BOARD
    ```
 

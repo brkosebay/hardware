@@ -4,7 +4,9 @@ A RAM payload that tests the A8 (T7000) GPU, a PowerVR GX6450, through powervr's
 (`kernel/patches/drivers/gpu/0063`–`0073`, `devices/t7000/0011` and `0012`). It is `minimal-boot` with a
 constant USB serial number (`a8-gpu-drm`, so macOS does not ask to allow the accessory on every boot),
 the kernel's modules, the GPU firmware, a test script and, optionally, a Vulkan bundle built from
-OrchardLinux/mesa.
+OrchardLinux/mesa. It also tests the A8's display pipe through the `adbe` KMS driver
+(`kernel/patches/drivers/drm/0012`–`0017`, `devices/t7000/0013`–`0018`), which this branch builds as a
+module (`apple_adbe_drm`) so that the payload boots on simpledrm and loads it only in the display step.
 
 It builds for every A8 board: the iPod touch 6 (`n102`, where the GPU has been tested), the iPad mini 4
 (`j96`, `j97`) and the iPhone 6 and 6 Plus (`n61`, `n56`). The A8X (iPad Air 2) has a different GPU.
@@ -63,6 +65,14 @@ the A8 GPU patches. `BOARD` below is one of the boards above.
 
 6. vkmark: `/opt/a8vk/vkmark.sh --size 256x256` and `--size 750x1334`.
 7. A soak: `a8-gpu-soak 1000 0` runs the `vk` step 1000 times.
+8. The display: `a8-gpu-drm-test display` loads `apple_adbe_drm` under the watchdog, which takes the panel
+   over from simpledrm. It reports `display-bind`, `display-dart` (the display DART's self-check passed, or
+   `BYPASS`), `display-crc` (the self-check's blend CRCs), then `a8-gpu-drm kms` checks the panel's mode and
+   link against the board (`eDP` on `j96`/`j97`, `DSI` on `n61`, `n56`, `n102`), a modeset with colour
+   bars, 30 page flips timed against 60 Hz, and a `powervr` buffer imported and scanned out through the
+   display DART (`imported=yes` in debugfs; skipped without powervr or in bypass). `display-kernel` fails on
+   a flip timeout, a pipe error, a DART fault or a kernel warning. The kernel lines go to
+   `/run/a8-gpu-drm/display.txt`. It needs no GPU step before it.
 
 The `compute` and `triangle` steps replay two Mesa recordings from the bring-up through the DRM ioctls
 (`src/a8-gpu-drm.c`). They need `A8_RECORDINGS` at build time, which this example does not provide;
@@ -72,17 +82,18 @@ without it `a8-gpu-drm-test all` skips them.
 
 On a board other than the iPod touch 6, report the board, the output of `a8-gpu-drm-test probe` with
 its kernel lines (`/run/a8-gpu-drm/probe.txt`, or `dmesg` if the device froze and the serial log is all
-there is), and the ladder's `RESULT` lines. If the probe freezes the device, the last kernel lines
-streamed over the serial console show how far it got.
+there is), the ladder's `RESULT` lines, and the output of `a8-gpu-drm-test display` with
+`/run/a8-gpu-drm/display.txt` and what the screen showed. If a step freezes the device, the last kernel
+lines streamed over the serial console show how far it got.
 
 ## Files
 
 | Path | What |
 |---|---|
 | `init` | PID 1: `minimal-boot` with the constant USB serial number |
-| `rootfs/usr/bin/a8-gpu-drm-test` | the test steps: `probe`, `compute`, `triangle`, `vk`, `all` |
+| `rootfs/usr/bin/a8-gpu-drm-test` | the test steps: `probe`, `compute`, `triangle`, `vk`, `display`, `all` |
 | `rootfs/usr/bin/a8-gpu-soak` | repeats the `vk` and `triangle` steps |
-| `src/a8-gpu-drm.c` | the DRM replay program: static aarch64, no libc |
+| `src/a8-gpu-drm.c` | the DRM replay program and the display step's KMS checks: static aarch64, no libc |
 | `tools/extract-fw.py` | the GPU firmware and border table from an Apple kernelcache |
 | `tools/gen-replay.py` | packs a Mesa recording into a replay file |
 | `vk/` | the Vulkan smoke test, the Vulkan ladder and `make-bundle.sh` |

@@ -10,11 +10,15 @@
  *   a8-gpu-drm triangle FILE.rpl  tri-twiddled: the 64x64 target, checked the way the
  *                                 bring-up module did (unflipped, twiddled layout)
  *   a8-gpu-drm info               the device's GPU ID and heaps
+ *   a8-gpu-drm kms W H eDP|DSI [nogpu|bypass]
+ *                                 the display pipe (adbe) through KMS: mode, link, modeset,
+ *                                 page flips, a powervr buffer scanned out (kms() below);
+ *                                 one RESULT line per check
  *   a8-gpu-drm dry compute|triangle FILE.rpl
  *                                 walk the recording without a device (every ioctl succeeds,
  *                                 BOs are anonymous memory): the check then fails
  *
- * The .rpl files come from tools/gen-replay.py. One line starts "RESULT".
+ * The .rpl files come from tools/gen-replay.py. One line starts "RESULT" (several for kms).
  * Exit status 0 is a pass.
  */
 #include <linux/types.h>
@@ -777,9 +781,469 @@ static int replay(int triangle)
 	}
 }
 
+/* ---- the display pipe (adbe) through KMS ---- */
+
+#define SYS_ppoll	73
+#define POLLIN		1
+#define FMT_XRGB8888	(0x58 | 0x52 << 8 | 0x32 << 16 | 0x34 << 24)	/* 'XR24' */
+#define KMS_FLIPS	30
+#define KMS_WAIT_MS	500	/* one flip, or the pipe's interrupt is not arriving */
+
+struct pollfd_ {
+	int fd;
+	short events, revents;
+};
+
+static int kfd = -1;
+static u32 kms_minor;
+
+static void result(const char *check, const char *verdict)
+{
+	puts_("RESULT display-");
+	puts_(check);
+	putch(' ');
+	puts_(verdict);
+}
+
+static int kioc(unsigned long req, void *arg)
+{
+	long r = sys3(SYS_ioctl, kfd, req, arg);
+
+	return r < 0 ? (int)r : 0;
+}
+
+/* The card the adbe driver registered; its minor is the debugfs directory. */
+static int open_card(void)
+{
+	char path[] = "/dev/dri/card0";
+	u32 i;
+
+	for (i = 0; i < 4; i++) {
+		char name[16] = { 0 };
+		struct drm_version v = { .name = name, .name_len = sizeof(name) - 1 };
+		int f;
+
+		path[sizeof(path) - 2] = '0' + i;
+		f = (int)sys6(SYS_openat, AT_FDCWD, (long)path, O_RDWR | O_CLOEXEC, 0, 0, 0);
+		if (f < 0)
+			continue;
+		if (!sys3(SYS_ioctl, f, DRM_IOCTL_VERSION, &v) && streq(name, "adbe")) {
+			kms_minor = i;
+			return f;
+		}
+		sys3(SYS_close, f, 0, 0);
+	}
+	return -19;
+}
+
+struct kfb {
+	u32 handle, pitch, fb;
+	u64 size;
+	u32 *map;
+};
+
+/* Vertical colour bars inside a white 8-pixel border; inverted: the bars swap order. */
+static void pattern(u32 *px, u32 pitch, u32 w, u32 h, int inverted)
+{
+	static const u32 bars[8] = { 0xffffff, 0xffff00, 0x00ffff, 0x00ff00,
+				     0xff00ff, 0xff0000, 0x0000ff, 0x000000 };
+	u32 x, y;
+
+	for (y = 0; y < h; y++)
+		for (x = 0; x < w; x++) {
+			u32 bar = x * 8 / w;
+			u32 v = bars[inverted ? 7 - bar : bar];
+
+			if (x < 8 || y < 8 || x >= w - 8 || y >= h - 8)
+				v = 0xffffff;
+			px[y * (pitch / 4) + x] = v;
+		}
+}
+
+static int dumb_fb(struct kfb *f, u32 w, u32 h)
+{
+	struct drm_mode_create_dumb c = { .width = w, .height = h, .bpp = 32 };
+	struct drm_mode_map_dumb m = { 0 };
+	struct drm_mode_fb_cmd2 fb = { .width = w, .height = h, .pixel_format = FMT_XRGB8888 };
+	int r;
+
+	r = kioc(DRM_IOCTL_MODE_CREATE_DUMB, &c);
+	if (r)
+		return r;
+	f->handle = c.handle;
+	f->pitch = c.pitch;
+	f->size = c.size;
+	m.handle = c.handle;
+	r = kioc(DRM_IOCTL_MODE_MAP_DUMB, &m);
+	if (r)
+		return r;
+	f->map = sys_mmap(0, f->size, PROT_READ | PROT_WRITE, MAP_SHARED, kfd, m.offset);
+	if (is_err((long)f->map))
+		return (int)(long)f->map;
+	fb.handles[0] = f->handle;
+	fb.pitches[0] = f->pitch;
+	r = kioc(DRM_IOCTL_MODE_ADDFB2, &fb);
+	f->fb = fb.fb_id;
+	return r;
+}
+
+/* One page flip to FB and its completion event: the event's time in us, or <0. */
+static long flip(u32 crtc, u32 fb)
+{
+	struct drm_mode_crtc_page_flip pf = {
+		.crtc_id = crtc, .fb_id = fb, .flags = DRM_MODE_PAGE_FLIP_EVENT, .user_data = fb,
+	};
+	struct pollfd_ p = { .fd = kfd, .events = POLLIN };
+	struct ts t = { 0, KMS_WAIT_MS * 1000000L };
+	struct drm_event_vblank ev;
+	int r;
+
+	r = kioc(DRM_IOCTL_MODE_PAGE_FLIP, &pf);
+	if (r)
+		return r;
+	r = (int)sys6(SYS_ppoll, (long)&p, 1, (long)&t, 0, 0, 0);
+	if (r <= 0)
+		return r ? r : -62;	/* ETIME */
+	r = (int)sys3(SYS_read, kfd, &ev, sizeof(ev));
+	if (r != sizeof(ev) || ev.base.type != DRM_EVENT_FLIP_COMPLETE || ev.user_data != fb)
+		return -71;	/* EPROTO */
+	return (long)ev.tv_sec * 1000000 + ev.tv_usec;
+}
+
+static usize slurp(const char *path, char *buf, usize cap)
+{
+	int f = (int)sys6(SYS_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
+	usize n = 0;
+
+	if (f < 0)
+		return 0;
+	while (n < cap - 1) {
+		long r = sys3(SYS_read, f, buf + n, cap - 1 - n);
+
+		if (r <= 0)
+			break;
+		n += r;
+	}
+	sys3(SYS_close, f, 0, 0);
+	buf[n] = 0;
+	return n;
+}
+
+static const char *find(const char *hay, const char *needle)
+{
+	for (; *hay; hay++) {
+		const char *h = hay, *n = needle;
+
+		while (*n && *h == *n)
+			h++, n++;
+		if (!*n)
+			return hay;
+	}
+	return 0;
+}
+
+static void fmt_u(char *b, const char *prefix, u32 v)
+{
+	char d[12];
+	int i = 0;
+
+	while (*prefix)
+		*b++ = *prefix++;
+	do {
+		d[i++] = '0' + v % 10;
+		v /= 10;
+	} while (v);
+	while (i--)
+		*b++ = d[i];
+	*b = 0;
+}
+
+/*
+ * debugfs: is FB on the primary plane (state), and is it an imported
+ * buffer (framebuffer)? 1 yes, 0 no, -1 debugfs unreadable.
+ */
+static char dbg[32768];
+static int fb_scanned_imported(u32 fb)
+{
+	char path[48], key[32];
+	const char *at, *next;
+	usize n;
+
+	if (kms_minor > 9)
+		return -1;
+	fmt_u(path, "/sys/kernel/debug/dri/", kms_minor);	/* 22 + 1 characters */
+	memcpy(path + 23, "/state", 7);
+	if (!slurp(path, dbg, sizeof(dbg)))
+		return -1;
+	fmt_u(key, "fb=", fb);
+	for (n = 0; key[n]; n++)
+		;
+	key[n] = '\n';
+	key[n + 1] = 0;
+	if (!find(dbg, key))
+		return 0;
+	memcpy(path + 23, "/framebuffer", 13);
+	if (!slurp(path, dbg, sizeof(dbg)))
+		return -1;
+	fmt_u(key, "framebuffer[", fb);
+	for (n = 0; key[n]; n++)
+		;
+	key[n] = ']';
+	key[n + 1] = 0;
+	at = find(dbg, key);
+	if (!at)
+		return 0;
+	next = find(at + 1, "framebuffer[");
+	at = find(at, "imported=yes");
+	return at && (!next || at < next);
+}
+
+/*
+ * a8-gpu-drm kms WIDTH HEIGHT eDP|DSI [nogpu|bypass]: on the adbe card, the
+ * panel's mode and link, a modeset of a dumb buffer with a test pattern, timed
+ * page flips, and a powervr buffer imported and scanned out through the
+ * display DART (skipped with nogpu or bypass). One RESULT line per check;
+ * exit 0 when all pass.
+ */
+static int kms(u32 want_w, u32 want_h, const char *want_link, const char *skip)
+{
+	u32 crtcs[4], conns[4], encs[4];
+	static struct drm_mode_modeinfo modes[64];
+	struct drm_mode_card_res res = { 0 };
+	struct drm_mode_get_connector gc = { 0 };
+	struct drm_mode_crtc sc = { 0 };
+	struct kfb a = { 0 }, b = { 0 }, imp = { 0 };
+	u32 i, w, h, conn, fails = 0, slow = 0;
+	long t0, t, prev, worst = 0;
+	const char *link;
+	int r;
+
+	kfd = open_card();
+	if (kfd < 0) {
+		result("card", "FAIL no adbe card in /dev/dri\n");
+		return 1;
+	}
+	puts_("display card: /dev/dri/card");
+	putu(kms_minor);
+	putch('\n');
+	sys3(SYS_ioctl, kfd, DRM_IOCTL_SET_MASTER, 0);
+
+	res.crtc_id_ptr = (u64)crtcs;
+	res.connector_id_ptr = (u64)conns;
+	res.encoder_id_ptr = (u64)encs;
+	res.count_crtcs = res.count_connectors = res.count_encoders = 4;
+	if (kioc(DRM_IOCTL_MODE_GETRESOURCES, &res) || res.count_crtcs != 1 ||
+	    res.count_connectors != 1) {
+		result("mode", "FAIL GETRESOURCES: not one CRTC and one connector\n");
+		return 1;
+	}
+	conn = conns[0];
+	/* the first call, with no mode array, probes the connector */
+	gc.connector_id = conn;
+	r = kioc(DRM_IOCTL_MODE_GETCONNECTOR, &gc);
+	if (!r && gc.count_modes >= 1 && gc.count_modes <= 64) {
+		gc = (struct drm_mode_get_connector) {
+			.connector_id = conn, .modes_ptr = (u64)modes, .count_modes = 64,
+		};
+		r = kioc(DRM_IOCTL_MODE_GETCONNECTOR, &gc);
+	}
+	if (r || gc.count_modes < 1 || gc.count_modes > 64) {
+		result("mode", "FAIL GETCONNECTOR: no mode\n");
+		return 1;
+	}
+	/* adbe offers the one mode iBoot left running */
+	for (i = 0; i < gc.count_modes - 1; i++)
+		if (modes[i].type & DRM_MODE_TYPE_PREFERRED)
+			break;
+	modes[0] = modes[i];
+	w = modes[0].hdisplay;
+	h = modes[0].vdisplay;
+	link = gc.connector_type == DRM_MODE_CONNECTOR_eDP ? "eDP" :
+	       gc.connector_type == DRM_MODE_CONNECTOR_DSI ? "DSI" : "other";
+
+	result("mode", w == want_w && h == want_h && gc.connection == 1 ? "PASS " : "FAIL ");
+	putu(w);
+	putch('x');
+	putu(h);
+	puts_("@");
+	putu(modes[0].vrefresh);
+	puts_(" ");
+	putu(gc.mm_width);
+	putch('x');
+	putu(gc.mm_height);
+	puts_(" mm, expected ");
+	putu(want_w);
+	putch('x');
+	putu(want_h);
+	puts_(gc.connection == 1 ? ", connected\n" : ", NOT connected\n");
+	fails += !(w == want_w && h == want_h && gc.connection == 1);
+
+	result("link", streq(link, want_link) ? "PASS " : "FAIL ");
+	puts_(link);
+	puts_("-1, expected ");
+	puts_(want_link);
+	putch('\n');
+	fails += !streq(link, want_link);
+
+	/* Modeset: buffer A with the bars */
+	r = dumb_fb(&a, w, h);
+	if (r) {
+		result("modeset", "FAIL dumb buffer: ");
+		puti(r);
+		putch('\n');
+		return 1;
+	}
+	pattern(a.map, a.pitch, w, h, 0);
+	sc.crtc_id = crtcs[0];
+	sc.fb_id = a.fb;
+	sc.set_connectors_ptr = (u64)&conn;
+	sc.count_connectors = 1;
+	sc.mode = modes[0];
+	sc.mode_valid = 1;
+	r = kioc(DRM_IOCTL_MODE_SETCRTC, &sc);
+	result("modeset", r ? "FAIL SETCRTC: " : "PASS ");
+	if (r) {
+		puti(r);
+		putch('\n');
+		return 1;
+	}
+	puts_("dumb XR24 ");
+	putu(w);
+	putch('x');
+	putu(h);
+	puts_(" pitch ");
+	putu(a.pitch);
+	puts_(": colour bars in a white border\n");
+
+	/* Flips: A and B (bars inverted); in bypass B may not fit in CMA: flip A to A */
+	if (dumb_fb(&b, w, h)) {
+		puts_("second dumb buffer refused; flipping the first to itself\n");
+		b = a;
+	} else {
+		pattern(b.map, b.pitch, w, h, 1);
+	}
+	prev = t0 = flip(crtcs[0], b.fb);
+	for (i = 1; i <= KMS_FLIPS && t0 >= 0; i++) {
+		t = flip(crtcs[0], i & 1 ? a.fb : b.fb);
+		if (t < 0) {
+			t0 = t;
+			break;
+		}
+		if (t - prev > worst)
+			worst = t - prev;
+		/* the driver completes a flip after 100 ms without an interrupt */
+		slow += t - prev > 90000;
+		prev = t;
+	}
+	if (t0 < 0) {
+		result("flip", "FAIL no flip event: ");
+		puti(t0);
+		putch('\n');
+		return 1;
+	}
+	t = (prev - t0) / KMS_FLIPS;
+	result("flip", !slow && t < 40000 ? "PASS " : "FAIL ");
+	putu(KMS_FLIPS);
+	puts_(" flips, ");
+	putu(t / 1000);
+	putch('.');
+	putu(t / 100 % 10);
+	puts_(" ms each, slowest ");
+	putu(worst / 1000);
+	puts_(" ms");
+	puts_(slow ? " (flips completed by the 100 ms timeout: no vblank interrupt)\n" : "\n");
+	fails += !(!slow && t < 40000);
+
+	/* A powervr buffer, filled by the CPU, imported and scanned out */
+	if (skip && streq(skip, "nogpu")) {
+		result("import", "SKIPPED (powervr is not loaded: run a8-gpu-drm-test probe first)\n");
+	} else if (skip) {
+		result("import", "SKIPPED (the display DART is in bypass: a scattered buffer cannot be scanned out)\n");
+	} else {
+		struct drm_pvr_ioctl_create_bo_args c = {
+			.size = (u64)a.pitch * h,
+			.flags = DRM_PVR_BO_BYPASS_DEVICE_CACHE | DRM_PVR_BO_ALLOW_CPU_USERSPACE_ACCESS,
+		};
+		struct drm_pvr_ioctl_get_bo_mmap_offset_args o = { 0 };
+		struct drm_prime_handle ex = { .flags = DRM_CLOEXEC | DRM_RDWR, .fd = -1 };
+		struct drm_prime_handle im = { .fd = -1 };
+		struct drm_mode_fb_cmd2 fb = { .width = w, .height = h, .pixel_format = FMT_XRGB8888 };
+		const char *why = 0;
+		int seen;
+
+		c.size = (c.size + 0x3fff) & ~0x3fffull;
+		fd = open_node();
+		if (fd < 0)
+			why = "no powervr render node";
+		else if (sys3(SYS_ioctl, fd, DRM_IOCTL_PVR_CREATE_BO, &c))
+			why = "powervr CREATE_BO";
+		else if ((o.handle = c.handle, sys3(SYS_ioctl, fd, DRM_IOCTL_PVR_GET_BO_MMAP_OFFSET, &o)))
+			why = "powervr GET_BO_MMAP_OFFSET";
+		else if (is_err((long)(imp.map = sys_mmap(0, c.size, PROT_READ | PROT_WRITE,
+							   MAP_SHARED, fd, o.offset))))
+			why = "powervr mmap";
+		if (!why) {
+			/* checkerboard of 64-pixel squares, so it differs from both bar patterns */
+			u32 x, y;
+
+			for (y = 0; y < h; y++)
+				for (x = 0; x < w; x++)
+					imp.map[y * (a.pitch / 4) + x] =
+						((x / 64) ^ (y / 64)) & 1 ? 0xff8000 : 0x0040ff;
+			ex.handle = c.handle;
+			if (sys3(SYS_ioctl, fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ex))
+				why = "PRIME export from powervr";
+			else if ((im.fd = ex.fd, kioc(DRM_IOCTL_PRIME_FD_TO_HANDLE, &im)))
+				why = "PRIME import into adbe (a scattered buffer needs the display DART)";
+		}
+		if (!why) {
+			fb.handles[0] = im.handle;
+			fb.pitches[0] = a.pitch;
+			if (kioc(DRM_IOCTL_MODE_ADDFB2, &fb))
+				why = "ADDFB2 of the imported buffer";
+			else if (flip(crtcs[0], fb.fb_id) < 0)
+				why = "page flip to the imported buffer";
+		}
+		seen = why ? 0 : fb_scanned_imported(fb.fb_id);
+		if (why) {
+			result("import", "FAIL ");
+			puts_(why);
+			putch('\n');
+			fails++;
+		} else if (seen == 1) {
+			result("import", "PASS powervr buffer on the primary plane, imported=yes in debugfs: "
+			       "orange and blue checkerboard\n");
+		} else {
+			result("import", seen ? "PASS flipped (debugfs unreadable, not confirmed)\n" :
+						"FAIL the imported framebuffer is not on the plane\n");
+			fails += !seen;
+		}
+		if (!why) {
+			struct ts d = { 2, 0 };
+
+			flush();
+			sys6(SYS_ppoll, 0, 0, (long)&d, 0, 0, 0);	/* 2 s for the eye */
+			flip(crtcs[0], a.fb);
+		}
+	}
+	flush();
+	return fails ? 1 : 0;
+}
+
 static int main_(int argc, char **argv)
 {
 	int err;
+
+	if (argc >= 5 && streq(argv[1], "kms")) {
+		u32 wd = 0, ht = 0;
+		const char *p;
+
+		for (p = argv[2]; *p >= '0' && *p <= '9'; p++)
+			wd = wd * 10 + (u32)(*p - '0');
+		for (p = argv[3]; *p >= '0' && *p <= '9'; p++)
+			ht = ht * 10 + (u32)(*p - '0');
+		return kms(wd, ht, argv[4], argc >= 6 ? argv[5] : 0);
+	}
 
 	if (argc == 4 && streq(argv[1], "dry")) {
 		dry = 1;
@@ -787,7 +1251,7 @@ static int main_(int argc, char **argv)
 		argc--;
 	}
 	if (argc < 2 || (!streq(argv[1], "info") && argc < 3)) {
-		puts_("usage: a8-gpu-drm compute|triangle FILE.rpl | info | dry compute|triangle FILE.rpl\n");
+		puts_("usage: a8-gpu-drm compute|triangle FILE.rpl | info | kms W H eDP|DSI [nogpu|bypass] | dry compute|triangle FILE.rpl\n");
 		return 2;
 	}
 	fd = dry ? -2 : open_node();

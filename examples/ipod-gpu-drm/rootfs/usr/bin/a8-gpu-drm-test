@@ -6,9 +6,15 @@
 #   triangle  Mesa's tri-twiddled recording (TA + 3D); the 64x64 target checked pixel by pixel
 #   vk        Mesa live on the real driver: /opt/a8vk/a8-vk-smoke all (Vulkan probe, compute,
 #             triangle); PASS = its three RESULT lines PASS
-#   all       probe, compute, triangle, vk; stops at the first step that does not pass and skips
-#             a step whose files this payload does not carry (no recordings, no /opt/a8vk)
-# Each step prints one RESULT line and runs once per boot (/run/a8-gpu-drm/STEP.done); --again repeats
+#   display   modprobe apple_adbe_drm: the display pipe driver takes the panel over from simpledrm
+#             (bind, the display DART's self-check and its CRCs), then a8-gpu-drm kms: the panel's
+#             mode and link (eDP on the iPad mini 4, MIPI DSI on the phones and the iPod), a
+#             modeset with colour bars, 30 timed page flips and, with powervr loaded and the DART
+#             translating, a powervr buffer scanned out through the display DART. One RESULT line
+#             per check, then "RESULT display PASS|FAIL". Needs no GPU step before it.
+#   all       probe, compute, triangle, vk, display; stops at the first step that does not pass and
+#             skips a step whose files this payload does not carry (no recordings, no /opt/a8vk)
+# Each step prints a final RESULT line and runs once per boot (/run/a8-gpu-drm/STEP.done); --again repeats
 # a step that passed. After a step that failed, or with the GPU left alone ("left as it is" in the
 # kernel log: Fender stuck, Apple panics there), nothing more runs on this boot.
 # Every step runs under a 30 s hardware watchdog, disarmed when the step ends: a frozen SoC resets.
@@ -34,9 +40,9 @@ refuse() {
 }
 
 case $step in
-probe|compute|triangle|vk) ;;
+probe|compute|triangle|vk|display) ;;
 all)
-    for s in probe compute triangle vk; do
+    for s in probe compute triangle vk display; do
         if [ -e "$D/$s.done" ]; then echo "RESULT $s PASS (earlier on this boot)"; continue; fi
         case $s in
         compute|triangle) [ -f "$SHARE/$s.rpl" ] || { echo "RESULT $s SKIPPED (no $SHARE/$s.rpl)"; continue; } ;;
@@ -45,13 +51,13 @@ all)
         "$0" "$s" || exit 1
     done
     exit 0 ;;
-*) echo "usage: a8-gpu-drm-test probe|compute|triangle|vk|all [--again]"; exit 2 ;;
+*) echo "usage: a8-gpu-drm-test probe|compute|triangle|vk|display|all [--again]"; exit 2 ;;
 esac
 
 [ -e "$D/FAILED" ] && refuse "a step failed on this boot ($(cat "$D/FAILED")): reboot first"
 dmesg | grep -q 'left as it is' && refuse "the kernel left the GPU alone (Fender stuck): reboot (DFU)"
 [ -e "$D/$step.done" ] && [ "$again" != --again ] && refuse "already passed on this boot (--again repeats it)"
-if [ "$step" != probe ] && ! grep -q '^powervr ' /proc/modules; then
+if [ "$step" != probe ] && [ "$step" != display ] && ! grep -q '^powervr ' /proc/modules; then
     refuse "powervr is not loaded: run a8-gpu-drm-test probe first"
 fi
 if [ "$step" = vk ]; then
@@ -62,6 +68,31 @@ fi
 case $step in
 compute|triangle) [ -f "$SHARE/$step.rpl" ] || refuse "no $SHARE/$step.rpl in this initramfs" ;;
 esac
+
+# display: the board's panel, from the device tree; the boot framebuffer simpledrm runs on
+be32() { set -- $(od -An -tu1 "$1" 2>/dev/null); [ $# -eq 4 ] && echo $(( ($1 << 24) | ($2 << 16) | ($3 << 8) | $4 )); }
+if [ "$step" = display ]; then
+    board=
+    for c in $(tr '\0' ' ' < /proc/device-tree/compatible); do
+        case $c in apple,n102|apple,n61|apple,n56|apple,j96|apple,j97) board=${c#apple,}; break ;; esac
+    done
+    case $board in
+    n102) panel="640 1136 DSI" ;;
+    n61) panel="750 1334 DSI" ;;
+    n56) panel="1080 1920 DSI" ;;
+    j96|j97) panel="1536 2048 eDP" ;;
+    *) refuse "not an A8 board this step knows: $(tr '\0' ' ' < /proc/device-tree/compatible)" ;;
+    esac
+    km=/lib/modules/$(uname -r)/kernel/drivers/gpu/drm/adbe/apple_adbe_drm.ko
+    [ -f "$km" ] || grep -q '^apple_adbe_drm ' /proc/modules || refuse "no $km in this initramfs"
+    [ -x /usr/bin/a8-gpu-drm ] || refuse "no /usr/bin/a8-gpu-drm"
+    bootfb=
+    for f in /proc/device-tree/chosen/framebuffer*; do
+        [ -f "$f/width" ] && bootfb="$(be32 "$f/width")x$(be32 "$f/height")" && break
+    done
+    echo "board $board: expect a $(echo $panel | awk '{print $1"x"$2" "$3}') panel; boot framebuffer ${bootfb:-not described}"
+    grep -q ' /sys/kernel/debug ' /proc/mounts || mount -t debugfs -o nosuid,nodev,noexec debugfs /sys/kernel/debug 2>/dev/null
+fi
 
 wd=
 for d in /dev/watchdog0 /dev/watchdog; do [ -c "$d" ] && { wd=$d; break; }; done
@@ -108,6 +139,73 @@ triangle)
     a8-gpu-drm triangle "$SHARE/triangle.rpl" > "$out" 2>&1 ;;
 vk)
     /opt/a8vk/a8-vk-smoke all > "$out" 2>&1 ;;
+display)
+    {
+    since() { dmesg | sed -n "/$marker/,\$p"; }
+    # the driver's own lines: from this step, or from the boot if it was loaded before (--again)
+    klog() { since; }
+    strip() { sed -n '1s/^\[[^]]*\] //p'; }
+    if grep -q '^apple_adbe_drm ' /proc/modules; then
+        echo "apple_adbe_drm already loaded"
+        klog() { dmesg; }
+    else
+        echo "modprobe apple_adbe_drm"
+        modprobe apple_adbe_drm || grep -q '^apple_adbe_drm ' /proc/modules || insmod "$km"
+    fi
+    # the probe runs inside modprobe; a deferred one gets 8 s
+    i=0
+    while [ $i -lt 8 ] && ! klog | grep -q -e '\[drm\] Initialized adbe' -e 'pipe is not running as iBoot'; do
+        sleep 1
+        i=$((i + 1))
+    done
+    dfail=0
+    bound=$(klog | grep '\[drm\] Initialized adbe' | strip)
+    if [ -z "$bound" ]; then
+        why=$(klog | grep -e 'apple-adbe' -e 'adbe' | grep -v 'A8-GPU-DRM' | tail -1 | strip)
+        echo "RESULT display-bind FAIL ${why:-no adbe card after 8 s}"
+        dfail=1
+    else
+        echo "RESULT display-bind PASS $bound"
+        if klog | grep -q 'display DART self-check passed' && klog | grep -q 'scanout through the display DART'; then
+            skip=
+            echo "RESULT display-dart PASS $(klog | grep 'scanout through the display DART' | strip)"
+        else
+            skip=bypass
+            why=$(klog | grep -e 'display DART self-check' -e 'translated scanout unavailable' -e 'display DART back in bypass' | tail -1 | strip)
+            echo "RESULT display-dart BYPASS ${why:-no display DART self-check ran}"
+        fi
+        set -- $(klog | grep -o 'pattern crc [0-9a-f]* translated [0-9a-f]* permuted [0-9a-f]*' | head -1)
+        if [ $# -eq 7 ]; then
+            # "pattern crc P translated T permuted Q": P = T, and Q differs, or the CRC is not live
+            ref=
+            if [ "$board" = n102 ]; then
+                [ "$3 $7" = "cf800572 6c333701" ] && ref=" (equal to the iPod touch 6's reference)" ||
+                    ref=" (the iPod touch 6's reference is cf800572/6c333701)"
+            fi
+            if [ "$3" = 00000000 ]; then
+                echo "RESULT display-crc SKIPPED (the self-check read no CRC: pattern $3, translated $5, permuted $7)"
+            elif [ "$3" = "$5" ] && [ "$3" != "$7" ]; then
+                echo "RESULT display-crc PASS blend CRC: pattern $3, translated $5, permuted $7$ref"
+            else
+                echo "RESULT display-crc MISMATCH blend CRC: pattern $3, translated $5, permuted $7 (the DART stays in bypass)"
+            fi
+        else
+            echo "RESULT display-crc SKIPPED (no self-check CRC in the kernel log; the driver has no other CRC readback)"
+        fi
+        [ -z "$skip" ] && ! grep -q '^powervr ' /proc/modules && skip=nogpu
+        a8-gpu-drm kms $panel $skip || dfail=1
+        bad=$(since | grep -e 'flip not acknowledged' -e 'pipe error bits' -e 'DART.*fault' -e 'SMMU.*fault' \
+                  -e 'Unable to handle' -e 'Internal error' -e 'BUG:' -e 'WARNING:' -e 'deprecated workqueue' |
+              grep -v -e 'self-check' | head -3)
+        if [ -n "$bad" ]; then
+            echo "RESULT display-kernel FAIL $(echo "$bad" | strip)"
+            dfail=1
+        else
+            echo "RESULT display-kernel PASS no flip timeout, pipe error, DART fault or warning"
+        fi
+    fi
+    [ $dfail = 0 ]
+    } > "$out" 2>&1 ;;
 esac
 rc=$?
 [ -n "$wdpid" ] && { kill -TERM $wdpid; wait $wdpid 2>/dev/null; }
@@ -115,7 +213,12 @@ rc=$?
 [ "$step" = probe ] && sleep 3
 kill $fwd 2>/dev/null
 
-dmesg | sed -n "/$marker/,\$p" | grep -i -e powervr -e 'A8-GPU-DRM' > "$D/$step.txt"
+if [ "$step" = display ]; then
+    dmesg | sed -n "/$marker/,\$p" | grep -i -e adbe -e display -e dart -e smmu -e drm -e simple-framebuffer \
+        -e fb0 -e flip -e pipe -e powervr -e 'A8-GPU-DRM' > "$D/$step.txt"
+else
+    dmesg | sed -n "/$marker/,\$p" | grep -i -e powervr -e 'A8-GPU-DRM' > "$D/$step.txt"
+fi
 grep -v '^RESULT' "$out"
 echo "---- kernel ($D/$step.txt):"
 cat "$D/$step.txt"
@@ -127,6 +230,15 @@ if [ "$step" = vk ]; then
         result="RESULT vk PASS (Mesa probe, compute, triangle)"
     else
         result="RESULT vk FAIL (exit $rc; see $out)"
+        rc=1
+    fi
+fi
+if [ "$step" = display ]; then
+    grep '^RESULT display-' "$out"
+    if [ $rc = 0 ]; then
+        result="RESULT display PASS ($(grep -c '^RESULT display-.* PASS' "$out") checks passed$(grep -q '^RESULT display-dart BYPASS' "$out" && echo ', display DART in bypass'))"
+    else
+        result="RESULT display FAIL (see the display- lines above and $D/display.txt)"
         rc=1
     fi
 fi
